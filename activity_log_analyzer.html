@@ -2297,61 +2297,45 @@ async function copyChartAsImage(chartWrapId, title){
     g.appendChild(clone); outSvg.appendChild(g);
     const xml = new XMLSerializer().serializeToString(outSvg);
     
-    // Try canvas rendering via data URL (more iframe-friendly than blob URL)
+    // Open the chart in a new window so the user can right-click save / screenshot.
+    // This is the most reliable approach inside iframes where downloads and clipboard are blocked.
+    const newWin = window.open('', '_blank');
+    if (newWin) {
+      newWin.document.write(
+        '<!DOCTYPE html><html><head><title>'+title+'</title>'+
+        '<style>body{margin:0;padding:20px;background:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:Futura,sans-serif}'+
+        'img{max-width:100%;height:auto;border:1px solid #e7e5e4}'+
+        '.bar{position:fixed;top:0;left:0;right:0;background:#f5f5f4;padding:8px 16px;border-bottom:1px solid #e7e5e4;font-size:12px;color:#78716c}'+
+        '</style></head><body>'+
+        '<div class="bar">Right-click the image and select "Save image as..." to download. Close this window when done.</div>'+
+        '<img src="data:image/svg+xml;charset=utf-8,'+encodeURIComponent(xml)+'" alt="'+title+'">'+
+        '</body></html>'
+      );
+      newWin.document.close();
+      toast('Chart opened in new tab - right-click to save','success');
+      return;
+    }
+    
+    // If window.open was blocked, try the data URL download approach
     const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
-    const img = new Image();
-    img.onload = () => {
+    
+    // Try clipboard with SVG type (doesn't need canvas rendering)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
-        const scale = 2;
-        const canvas = document.createElement('canvas');
-        canvas.width = totalW * scale; canvas.height = totalH * scale;
-        const ctx = canvas.getContext('2d');
-        ctx.scale(scale, scale); ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,totalW,totalH);
-        ctx.drawImage(img, 0, 0, totalW, totalH);
-        // Try clipboard first, fall back to download
-        const tryClipboard = async () => {
-          if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
-            const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-            if (blob) {
-              await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
-              toast('Chart copied to clipboard','success');
-              return true;
-            }
-          }
-          return false;
-        };
-        const tryDownload = () => {
-          const a = document.createElement('a');
-          a.href = canvas.toDataURL('image/png');
-          a.download = title.replace(/\s+/g,'-').toLowerCase()+'.png';
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          toast('Chart downloaded as PNG','success');
-        };
-        tryClipboard().then(ok => { if(!ok) tryDownload(); }).catch(() => tryDownload());
-      } catch(e) {
-        // Canvas tainted or toBlob failed — download SVG directly instead
-        const a = document.createElement('a');
-        a.href = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
-        a.download = title.replace(/\s+/g,'-').toLowerCase()+'.svg';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        toast('Chart downloaded as SVG','success');
-      }
-    };
-    img.onerror = () => {
-      // Image rendering failed — download SVG directly as fallback
-      const a = document.createElement('a');
-      a.href = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
-      a.download = title.replace(/\s+/g,'-').toLowerCase()+'.svg';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      toast('Chart downloaded as SVG','success');
-    };
-    img.src = dataUrl;
+        await navigator.clipboard.writeText(xml);
+        toast('Chart SVG copied to clipboard','success');
+        return;
+      } catch(e) { /* fall through */ }
+    }
+    
+    // Last resort: try anchor download
+    const a = document.createElement('a');
+    a.href = dataUrl;
+    a.download = title.replace(/\s+/g,'-').toLowerCase()+'.svg';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast('Chart downloaded as SVG','success');
   } catch(err){
     console.error(err);
     toast('Failed to copy chart: '+err.message,'error');
