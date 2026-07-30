@@ -2223,16 +2223,48 @@ function exportApiBreakdown(){
 
 /* CHART COPY */
 function inlineSvgComputedStyles(srcSvg, cloneSvg){
+  // First, resolve all CSS variables from :root so we can replace var(--x) references
+  const rootStyle = window.getComputedStyle(document.documentElement);
+  const varCache = {};
+  const cssVars = ['--bg','--card','--card-2','--border','--border-strong','--text','--text-2','--muted','--muted-2',
+    '--accent','--accent-hover','--accent-soft','--success','--success-bg','--timeout','--timeout-bg',
+    '--error','--error-bg','--line','--grid','--font','--mono'];
+  cssVars.forEach(v => { const val = rootStyle.getPropertyValue(v).trim(); if(val) varCache[v] = val; });
+  
+  function resolveVar(val) {
+    if (!val || typeof val !== 'string') return val;
+    // Replace var(--x) with resolved values
+    return val.replace(/var\((--[a-z-]+)\)/g, (match, varName) => varCache[varName] || match);
+  }
+  
   const srcEls = [srcSvg];
   srcSvg.querySelectorAll('*').forEach(e=>srcEls.push(e));
   const cloneEls = [cloneSvg];
   cloneSvg.querySelectorAll('*').forEach(e=>cloneEls.push(e));
   const props = ['fill','stroke','stroke-width','stroke-dasharray','stroke-linecap','stroke-linejoin','opacity','font-size','font-weight','font-family','text-anchor','fill-opacity','stroke-opacity','letter-spacing'];
   for (let i=0;i<cloneEls.length && i<srcEls.length;i++){
+    // First, resolve any var() in existing attributes
+    const attrs = cloneEls[i].attributes;
+    for (let a=0; a<attrs.length; a++){
+      const resolved = resolveVar(attrs[a].value);
+      if (resolved !== attrs[a].value) cloneEls[i].setAttribute(attrs[a].name, resolved);
+    }
+    // Then apply computed styles (which resolve vars in the live DOM)
     const cs = window.getComputedStyle(srcEls[i]);
-    for (const p of props){ const v = cs.getPropertyValue(p); if(v&&v!=='') cloneEls[i].setAttribute(p, v); }
-    const fillAttr = srcEls[i].getAttribute('fill');
-    if (fillAttr==='transparent') cloneEls[i].setAttribute('fill','transparent');
+    for (const p of props){
+      let v = cs.getPropertyValue(p);
+      if (v && v !== '') {
+        v = resolveVar(v);
+        cloneEls[i].setAttribute(p, v);
+      }
+    }
+    // Explicitly handle fill/stroke that might still have var()
+    const fillAttr = cloneEls[i].getAttribute('fill');
+    if (fillAttr) cloneEls[i].setAttribute('fill', resolveVar(fillAttr));
+    const strokeAttr = cloneEls[i].getAttribute('stroke');
+    if (strokeAttr) cloneEls[i].setAttribute('stroke', resolveVar(strokeAttr));
+    // Handle transparent fills
+    if (fillAttr === 'transparent') cloneEls[i].setAttribute('fill','transparent');
   }
 }
 async function copyChartAsImage(chartWrapId, title){
@@ -2264,25 +2296,66 @@ async function copyChartAsImage(chartWrapId, title){
     clone.removeAttribute('style');clone.removeAttribute('width');clone.removeAttribute('height');
     g.appendChild(clone); outSvg.appendChild(g);
     const xml = new XMLSerializer().serializeToString(outSvg);
-    const url = URL.createObjectURL(new Blob([xml], {type:'image/svg+xml;charset=utf-8'}));
+    
+    // Try canvas rendering via data URL (more iframe-friendly than blob URL)
+    const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
     const img = new Image();
     img.onload = () => {
-      const scale = 2;
-      const canvas = document.createElement('canvas');
-      canvas.width = totalW * scale; canvas.height = totalH * scale;
-      const ctx = canvas.getContext('2d');
-      ctx.scale(scale, scale); ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,totalW,totalH);
-      ctx.drawImage(img, 0, 0, totalW, totalH);
-      URL.revokeObjectURL(url);
-      canvas.toBlob(async (blob)=>{
-        if (!blob){ toast('Failed to render chart','error'); return; }
-        try { await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]); toast('Chart copied to clipboard','success'); }
-        catch(e){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=title.replace(/\s+/g,'-').toLowerCase()+'.png'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); toast('Downloaded PNG','success'); }
-      }, 'image/png');
+      try {
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = totalW * scale; canvas.height = totalH * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale); ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,totalW,totalH);
+        ctx.drawImage(img, 0, 0, totalW, totalH);
+        // Try clipboard first, fall back to download
+        const tryClipboard = async () => {
+          if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
+            const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+            if (blob) {
+              await navigator.clipboard.write([new ClipboardItem({'image/png': blob})]);
+              toast('Chart copied to clipboard','success');
+              return true;
+            }
+          }
+          return false;
+        };
+        const tryDownload = () => {
+          const a = document.createElement('a');
+          a.href = canvas.toDataURL('image/png');
+          a.download = title.replace(/\s+/g,'-').toLowerCase()+'.png';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          toast('Chart downloaded as PNG','success');
+        };
+        tryClipboard().then(ok => { if(!ok) tryDownload(); }).catch(() => tryDownload());
+      } catch(e) {
+        // Canvas tainted or toBlob failed — download SVG directly instead
+        const a = document.createElement('a');
+        a.href = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+        a.download = title.replace(/\s+/g,'-').toLowerCase()+'.svg';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        toast('Chart downloaded as SVG','success');
+      }
     };
-    img.onerror = () => { URL.revokeObjectURL(url); toast('Failed to render chart image','error'); };
-    img.src = url;
-  } catch(err){ console.error(err); toast('Failed to copy chart: '+err.message,'error'); }
+    img.onerror = () => {
+      // Image rendering failed — download SVG directly as fallback
+      const a = document.createElement('a');
+      a.href = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+      a.download = title.replace(/\s+/g,'-').toLowerCase()+'.svg';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      toast('Chart downloaded as SVG','success');
+    };
+    img.src = dataUrl;
+  } catch(err){
+    console.error(err);
+    toast('Failed to copy chart: '+err.message,'error');
+  }
 }
 
 /* THEME */
